@@ -29,7 +29,7 @@ try:
         wait.until(lambda d: d.execute_script("return document.documentElement.scrollTop") >= num)
 
     print("開啟網頁中...")
-    driver.get("https://tixcraft.com/activity/detail/25_bii")
+    driver.get("https://tixcraft.com/activity/detail/26_amz")
 
     scroll(500)
 
@@ -41,10 +41,10 @@ try:
     elem_operate_2 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='btn btn-primary text-bold m-0' and contains(text(), '立即訂購')]")))
     elem_operate_2.click()
 
-    scroll(500)
+    scroll(100)
 
     # 選擇座位
-    available_seats = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.select_form_b")))
+    available_seats = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.select_form_a")))
     if available_seats:
         seat = wait.until(EC.element_to_be_clickable(available_seats[0]))
         seat.click()
@@ -54,7 +54,7 @@ try:
     scroll(400)
 
     # 選擇票數
-    elem_select_num = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='TicketForm_ticketPrice_02']")))
+    elem_select_num = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='TicketForm_ticketPrice_01']")))
     Select(elem_select_num).select_by_value("1")
 
     # 截圖驗證碼
