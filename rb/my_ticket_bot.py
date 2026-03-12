@@ -1,18 +1,33 @@
+from __future__ import annotations
+
+import os
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import torch
+import torch.nn as nn
+from PIL import Image
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import Select
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from PIL import Image
-import cv2
-import torch
-import torch.nn as nn
+from selenium.webdriver.support.ui import Select, WebDriverWait
 from torchvision import transforms
-from pathlib import Path
 
 
-# 定義 CRNN 模型
+# -----------------------------
+# 可自行調整區域
+# -----------------------------
+TARGET_URL = "https://tixcraft.com/activity/detail/26_laufey"
+RUN_AT_TW = "01:23"  # 例如 "12:00" 或 "12:00:00"，設為 "" 代表立即執行
+DEBUGGER_ADDRESS = "127.0.0.1:9222"
+WAIT_TIMEOUT_SECONDS = 10
+TICKET_SELECT_XPATH = "//*[@id='TicketForm_ticketPrice_11']"
+TICKET_COUNT = "1"
+
+
 class CaptchaCRNN(nn.Module):
     def __init__(self, seq_length: int = 4, num_classes: int = 26):
         super().__init__()
@@ -67,137 +82,148 @@ class CaptchaCRNN(nn.Module):
         return output
 
 
-# 字符集定義
 CHAR_SET = "abcdefghijklmnopqrstuvwxyz"
 IDX_TO_CHAR = {idx: ch for idx, ch in enumerate(CHAR_SET)}
 
-# 初始化模型
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = CaptchaCRNN().to(device)
-model_path = Path(__file__).resolve().parent / "captcha_model" / "best_lowercase_crnn.pth"
-if model_path.exists():
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-    print(f"模型已加載: {model_path}")
-else:
-    print(f"警告：模型文件未找到: {model_path}")
 
-transform = transforms.Compose([
-    transforms.Grayscale(),
-    transforms.Resize((60, 200)),
-    transforms.ToTensor(),
-])
+def wait_until_tw_time(run_at_tw: str) -> None:
+    run_at_tw = (run_at_tw or "").strip()
+    if not run_at_tw:
+        print("未設定排程時間，立即執行。")
+        return
 
-try:
+    tz = ZoneInfo("Asia/Taipei")
+    fmt = "%H:%M:%S" if len(run_at_tw.split(":")) == 3 else "%H:%M"
+    target_clock = datetime.strptime(run_at_tw, fmt).time()
+    now = datetime.now(tz)
+    target_dt = datetime.combine(now.date(), target_clock, tzinfo=tz)
+
+    if now >= target_dt:
+        print(f"目前台灣時間 {now.strftime('%H:%M:%S')} 已超過設定時間 {run_at_tw}，立即執行。")
+        return
+
+    print(f"已預載完成，等待台灣時間 {run_at_tw} 開始流程...")
+    last_print_second = -1
+    while True:
+        now = datetime.now(tz)
+        remain = (target_dt - now).total_seconds()
+        if remain <= 0:
+            print(f"到達台灣時間 {run_at_tw}，開始執行。")
+            return
+
+        if int(remain) != last_print_second and int(remain) % 30 == 0:
+            print(f"倒數 {int(remain)} 秒")
+            last_print_second = int(remain)
+
+        time.sleep(0.2 if remain <= 5 else 1.0)
+
+
+def fast_click(driver: webdriver.Chrome, wait: WebDriverWait, by: By, selector: str) -> None:
+    element = wait.until(EC.element_to_be_clickable((by, selector)))
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+    driver.execute_script("arguments[0].click();", element)
+
+
+def predict_captcha_text(
+    model: nn.Module,
+    device: torch.device,
+    transform: transforms.Compose,
+    captcha_image_path: Path,
+) -> str:
+    image = Image.open(captcha_image_path).convert("RGB")
+    image_tensor = transform(image).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        logits = model(image_tensor)
+        pred_idx = logits.argmax(dim=2).squeeze(0).tolist()
+
+    return "".join(IDX_TO_CHAR[i] for i in pred_idx)
+
+
+def main() -> int:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CaptchaCRNN().to(device)
+    model_path = Path(__file__).resolve().parent / "captcha_model" / "best_lowercase_crnn.pth"
+    if model_path.exists():
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval()
+        print(f"模型已加載: {model_path}")
+    else:
+        raise FileNotFoundError(f"模型文件未找到: {model_path}")
+
+    transform = transforms.Compose(
+        [
+            transforms.Grayscale(),
+            transforms.Resize((60, 200)),
+            transforms.ToTensor(),
+        ]
+    )
+
     options = Options()
-    options.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-    options.page_load_strategy = 'eager'
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-
+    options.add_experimental_option("debuggerAddress", DEBUGGER_ADDRESS)
+    options.page_load_strategy = "eager"
     driver = webdriver.Chrome(options=options)
-    wait = WebDriverWait(driver, 10)
+    wait = WebDriverWait(driver, WAIT_TIMEOUT_SECONDS)
 
-    def scroll(num):
-        driver.execute_script(f"window.scrollTo(0, {num});")  
-        wait.until(lambda d: d.execute_script("return document.documentElement.scrollTop") >= num)
+    wait_until_tw_time(RUN_AT_TW)
 
     print("開啟網頁中...")
-    driver.get("https://tixcraft.com/activity/detail/26_laufey")
-
-    scroll(500)
+    driver.get(TARGET_URL)
 
     # 點開購票
-    elem_operate_1 = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[@class='activityContent']//li[@class='buy']/a")))
-    elem_operate_1.click()
+    fast_click(driver, wait, By.XPATH, "//div[@class='activityContent']//li[@class='buy']/a")
 
-    # 立即購票
-    elem_operate_2 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='btn btn-primary text-bold m-0' and contains(text(), '立即訂購')]")))
-    elem_operate_2.click()
+    # 立即訂購
+    fast_click(
+        driver,
+        wait,
+        By.XPATH,
+        "//button[@class='btn btn-primary text-bold m-0' and contains(text(), '立即訂購')]",
+    )
 
-
-
-    # 選擇座位
-    available_seats = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.select_form_a")))
-    if available_seats:
-        seat = wait.until(EC.element_to_be_clickable(available_seats[0]))
-        seat.click()
-    else:
-        raise Exception("無可購買座位")
-
-    scroll(400)
+    # 選擇座位（第一個可點擊）
+    seats = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.select_form_a")))
+    if not seats:
+        raise RuntimeError("無可購買座位")
+    driver.execute_script("arguments[0].click();", seats[0])
 
     # 選擇票數
-    elem_select_num = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='TicketForm_ticketPrice_11']")))
-    Select(elem_select_num).select_by_value("1")
+    ticket_select = wait.until(EC.element_to_be_clickable((By.XPATH, TICKET_SELECT_XPATH)))
+    Select(ticket_select).select_by_value(TICKET_COUNT)
 
-    # 截圖驗證碼—直接讓 element 擷取，避免座標偏移
-    element = driver.find_element(By.ID, "TicketForm_verifyCode-image")
-    print("驗證碼網址：", element.get_attribute("src"))
-    # 確保目錄存在
-    import os
-    os.makedirs('captcha', exist_ok=True)
-    element.screenshot('captcha/captcha.png')
+    # 擷取驗證碼
+    captcha_element = wait.until(EC.presence_of_element_located((By.ID, "TicketForm_verifyCode-image")))
+    print("驗證碼網址：", captcha_element.get_attribute("src"))
+    captcha_dir = Path("captcha")
+    os.makedirs(captcha_dir, exist_ok=True)
+    captcha_path = captcha_dir / "captcha.png"
+    captcha_element.screenshot(str(captcha_path))
 
-    # 使用 CRNN 模型辨識驗證碼
-    try:
-        image = Image.open('captcha/captcha.png').convert("RGB")
-        image_tensor = transform(image).unsqueeze(0).to(device)
-        
-        with torch.no_grad():
-            logits = model(image_tensor)
-            pred_idx = logits.argmax(dim=2).squeeze(0).tolist()
-        
-        text = "".join(IDX_TO_CHAR[i] for i in pred_idx)
-        print(f"CRNN 模型識別結果: '{text}'")
-    except Exception as e:
-        print(f"模型推理失敗，改用備用方案：{e}")
-        # 備用方案：簡單的圖像處理
-        img = cv2.imread('captcha/captcha.png')
-        if img is None:
-            raise Exception('無法讀取 captcha.png 檔案')
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        gray = clahe.apply(gray)
-        gray = cv2.medianBlur(gray, 3)
-        dst = 255 - gray
-        _, binary_img = cv2.threshold(dst, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # 由於移除了 pytesseract，此處使用簡單替代
-        print("無法進行備用識別")
-        text = ""
-
+    text = predict_captcha_text(model, device, transform, captcha_path)
+    print(f"CRNN 模型識別結果: '{text}'")
 
     # 輸入驗證碼
-    print("正在定位驗證碼輸入欄位...")
-    try:
-        input_captcha = wait.until(EC.presence_of_element_located((
-            (By.ID, "TicketForm_verifyCode")
-        )))
-        input_captcha.clear()  # 清除可能存在的文字
-        input_captcha.send_keys(text)
-        print("測試驗證碼已輸入")
-    except Exception as e:
-        print(f"輸入驗證碼時發生錯誤：{e}")
-        raise
+    input_captcha = wait.until(EC.presence_of_element_located((By.ID, "TicketForm_verifyCode")))
+    input_captcha.clear()
+    input_captcha.send_keys(text)
+    print("驗證碼已輸入")
 
+    # 關閉可能彈窗
     try:
-        driver.switch_to.alert.accept()  # 若出現彈出視窗，點掉
+        driver.switch_to.alert.accept()
     except Exception:
         pass
 
-    # 點選 "我同意"
-    accept = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='TicketForm_agree']")))
-    accept.click()
+    # 同意條款 + 提交
+    fast_click(driver, wait, By.XPATH, "//*[@id='TicketForm_agree']")
+    fast_click(driver, wait, By.CSS_SELECTOR, "button.btn.btn-primary.btn-green")
+    print("提交流程完成")
+    return 0
 
-    # 提交
-    confirm = wait.until(EC.element_to_be_clickable((
-        By.CSS_SELECTOR, 
-        "button.btn.btn-primary.btn-green"
-    )))
-    confirm.click()
 
-except Exception as e:
-    print(f"錯誤：{e}")
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:  # noqa: BLE001
+        print(f"錯誤：{exc}")
+        raise
