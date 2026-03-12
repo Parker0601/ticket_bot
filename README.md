@@ -4,6 +4,15 @@
 
 ## 快速開始
 
+### 模式 CRNN（直接執行，使用新模型）
+
+1. 先開啟可被 Selenium 接管的 Chrome（可用現有 `start_chrome_for_bot.bat` 或 `start_chrome_ps1.ps1`）。
+2. 直接執行：
+   - 雙擊 `run_my_ticket_bot_with_crnn.bat`
+   - 或 PowerShell：`powershell -ExecutionPolicy Bypass -File run_my_ticket_bot_with_crnn.ps1`
+
+此模式會使用：`rb/captcha_model/best_lowercase_crnn.pth` 進行驗證碼預測。
+
 ### 模式 A：使用已登入的 Chrome（推薦）
 有登入狀態，可保留原先的帳號、購物車等。
 
