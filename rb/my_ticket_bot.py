@@ -6,11 +6,87 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from PIL import Image
 import cv2
-import pytesseract
+import torch
+import torch.nn as nn
+from torchvision import transforms
+from pathlib import Path
 
 
-# 設定 Tesseract 路徑
-pytesseract.pytesseract.tesseract_cmd = r"C:\Windsurf\OCR_data\tesseract.exe"
+# 定義 CRNN 模型
+class CaptchaCRNN(nn.Module):
+    def __init__(self, seq_length: int = 4, num_classes: int = 26):
+        super().__init__()
+        self.seq_length = seq_length
+        self.num_classes = num_classes
+
+        self.cnn = nn.Sequential(
+            nn.Conv2d(1, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Dropout(0.25),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Dropout(0.25),
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Dropout(0.25),
+            nn.Conv2d(256, 256, kernel_size=(7, 1)),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.Dropout(0.25),
+        )
+
+        self.rnn_input_size = 256
+        self.rnn_hidden_size = 512
+        self.lstm = nn.LSTM(
+            self.rnn_input_size,
+            self.rnn_hidden_size,
+            num_layers=2,
+            bidirectional=True,
+            dropout=0.5,
+            batch_first=True,
+        )
+        self.adaptive_pool = nn.AdaptiveAvgPool1d(self.seq_length)
+        self.classifier = nn.Linear(self.rnn_hidden_size * 2, self.num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.cnn(x)
+        x = x.squeeze(2)
+        x = x.permute(0, 2, 1)
+        output, _ = self.lstm(x)
+        output = output.permute(0, 2, 1)
+        output = self.adaptive_pool(output)
+        output = output.permute(0, 2, 1)
+        output = self.classifier(output.contiguous().view(-1, self.rnn_hidden_size * 2))
+        output = output.view(-1, self.seq_length, self.num_classes)
+        return output
+
+
+# 字符集定義
+CHAR_SET = "abcdefghijklmnopqrstuvwxyz"
+IDX_TO_CHAR = {idx: ch for idx, ch in enumerate(CHAR_SET)}
+
+# 初始化模型
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = CaptchaCRNN().to(device)
+model_path = Path(__file__).resolve().parent / "captcha_model" / "best_lowercase_crnn.pth"
+if model_path.exists():
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    print(f"模型已加載: {model_path}")
+else:
+    print(f"警告：模型文件未找到: {model_path}")
+
+transform = transforms.Compose([
+    transforms.Grayscale(),
+    transforms.Resize((60, 200)),
+    transforms.ToTensor(),
+])
 
 try:
     options = Options()
@@ -29,7 +105,7 @@ try:
         wait.until(lambda d: d.execute_script("return document.documentElement.scrollTop") >= num)
 
     print("開啟網頁中...")
-    driver.get("https://tixcraft.com/activity/detail/26_amz")
+    driver.get("https://tixcraft.com/activity/detail/26_laufey")
 
     scroll(500)
 
@@ -41,7 +117,7 @@ try:
     elem_operate_2 = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@class='btn btn-primary text-bold m-0' and contains(text(), '立即訂購')]")))
     elem_operate_2.click()
 
-    scroll(100)
+
 
     # 選擇座位
     available_seats = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.select_form_a")))
@@ -54,47 +130,45 @@ try:
     scroll(400)
 
     # 選擇票數
-    elem_select_num = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='TicketForm_ticketPrice_01']")))
+    elem_select_num = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[@id='TicketForm_ticketPrice_11']")))
     Select(elem_select_num).select_by_value("1")
 
-    # 截圖驗證碼
-    path = 'captcha/screenshot.png'
-    driver.save_screenshot(path)  # 先將目前的 screen 存起來
-
-
+    # 截圖驗證碼—直接讓 element 擷取，避免座標偏移
     element = driver.find_element(By.ID, "TicketForm_verifyCode-image")
-    print(element.get_attribute("src"))  # 檢查驗證碼圖片網址
+    print("驗證碼網址：", element.get_attribute("src"))
+    # 確保目錄存在
+    import os
+    os.makedirs('captcha', exist_ok=True)
+    element.screenshot('captcha/captcha.png')
 
-    location = element.location
-    size = element.size
-    left = location['x'] + 140
-    top = location['y'] - 330
-    right = location['x'] + size['width'] + 160
-    bottom = location['y'] + size['height'] - 330
+    # 使用 CRNN 模型辨識驗證碼
+    try:
+        image = Image.open('captcha/captcha.png').convert("RGB")
+        image_tensor = transform(image).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            logits = model(image_tensor)
+            pred_idx = logits.argmax(dim=2).squeeze(0).tolist()
+        
+        text = "".join(IDX_TO_CHAR[i] for i in pred_idx)
+        print(f"CRNN 模型識別結果: '{text}'")
+    except Exception as e:
+        print(f"模型推理失敗，改用備用方案：{e}")
+        # 備用方案：簡單的圖像處理
+        img = cv2.imread('captcha/captcha.png')
+        if img is None:
+            raise Exception('無法讀取 captcha.png 檔案')
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+        gray = cv2.medianBlur(gray, 3)
+        dst = 255 - gray
+        _, binary_img = cv2.threshold(dst, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # 由於移除了 pytesseract，此處使用簡單替代
+        print("無法進行備用識別")
+        text = ""
 
-    image = Image.open(path)
-    image = image.crop((left, top, right, bottom))
-    image.save('captcha/captcha.png', 'png')
-
-    # OCR 辨識驗證碼
-    img = cv2.imread('captcha/captcha.png')
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    dst = 255 - gray
-    cv2.imwrite('captcha/captcha_gray.png', dst)
-
-    # 圖片二值化
-    picture = Image.open('captcha/captcha_gray.png')
-    gray = picture.convert('L')
-
-    threshold = 115
-    table = [0 if i < threshold else 1 for i in range(256)]
-    binary = gray.point(table, '1')
-    binary.save('captcha/captcha_binary.png')
-
-    # OCR 解析
-    Pic_read = Image.open('captcha/captcha_binary.png')
-    text = pytesseract.image_to_string(Pic_read)
 
     # 輸入驗證碼
     print("正在定位驗證碼輸入欄位...")
