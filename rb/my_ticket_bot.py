@@ -23,8 +23,8 @@ from torchvision import transforms
 # -----------------------------
 # 可自行調整區域
 # -----------------------------
-TARGET_URL = "https://tixcraft.com/activity/detail/26_laufey"
-RUN_AT_TW = "15:39"  # 例如 "12:00" 或 "12:00:00"，設為 "" 代表立即執行
+TARGET_URL = "https://tixcraft.com/activity/detail/26_malone"
+RUN_AT_TW = "11:14"  # 例如 "12:00" 或 "12:00:00"，設為 "" 代表立即執行
 DEBUGGER_ADDRESS = "127.0.0.1:9222"
 WAIT_TIMEOUT_SECONDS = 10
 TICKET_SELECT_CSS = "select[id^='TicketForm_ticketPrice_']"
@@ -36,8 +36,8 @@ CAPTCHA_INPUT_ID = "TicketForm_verifyCode"
 CAPTCHA_MIN_CONFIDENCE = 0.92
 CAPTCHA_MAX_ATTEMPTS = 3
 PREFERRED_AREAS = [
-    "黃1B-2區 (best available)",
-    "黃2B-1區",
+    "搖滾站區(GA)",
+    ""
 ]
 
 
