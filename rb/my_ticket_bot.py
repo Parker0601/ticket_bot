@@ -15,6 +15,7 @@ from PIL import Image
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from torchvision import transforms
@@ -23,8 +24,8 @@ from torchvision import transforms
 # -----------------------------
 # 可自行調整區域
 # -----------------------------
-TARGET_URL = "https://tixcraft.com/activity/detail/26_malone"
-RUN_AT_TW = "11:14"  # 例如 "12:00" 或 "12:00:00"，設為 "" 代表立即執行
+TARGET_URL = "https://tixcraft.com/activity/detail/26_joji"
+RUN_AT_TW = "14:51"  # 例如 "12:00" 或 "12:00:00"，設為 "" 代表立即執行
 DEBUGGER_ADDRESS = "127.0.0.1:9222"
 WAIT_TIMEOUT_SECONDS = 10
 TICKET_SELECT_CSS = "select[id^='TicketForm_ticketPrice_']"
@@ -36,7 +37,8 @@ CAPTCHA_INPUT_ID = "TicketForm_verifyCode"
 CAPTCHA_MIN_CONFIDENCE = 0.92
 CAPTCHA_MAX_ATTEMPTS = 3
 PREFERRED_AREAS = [
-    "搖滾站區(GA)",
+    "搖滾站區 (GA)",
+    "橙207區",
     ""
 ]
 
@@ -165,46 +167,49 @@ def visible_attach_handshake(driver: webdriver.Chrome) -> None:
     print(f"[可視化握手] 已建立識別分頁: about:blank#bot_connected_{ts}")
 
 
-def click_first_available_seat(driver: webdriver.Chrome, wait: WebDriverWait) -> None:
+def click_seat_by_area(driver: webdriver.Chrome, wait: WebDriverWait, area_name: str) -> None:
+    """嘗試點選指定區域名稱的座位。area_name 為空字串代表任意可用區域。"""
     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul.area-list li a[id]")))
+    available_keywords = ("剩餘", "熱賣中")
     blocked_keywords = ("已售完", "Sold Out", "售完", "暫無票")
     blocked_classes = ("disabled", "soldout", "sold_out", "none", "off")
 
     def _is_blocked(text: str, class_name: str) -> bool:
+        if any(keyword in text for keyword in available_keywords):
+            return False
         if any(keyword in text for keyword in blocked_keywords):
             return True
         return any(flag in class_name for flag in blocked_classes)
 
     seats = driver.find_elements(By.CSS_SELECTOR, "ul.area-list li a[id]")
-
-    # 先嘗試使用者指定區域名稱（不綁 group_0，跨所有 area-list 搜尋）
-    for area_name in PREFERRED_AREAS:
-        for seat in seats:
-            text = (seat.text or "").strip()
-            class_name = (seat.get_attribute("class") or "").lower()
-            if area_name not in text:
-                continue
-            if _is_blocked(text, class_name):
-                continue
-            if driver.execute_script("arguments[0].click(); return true;", seat):
-                print(f"已選指定區域: area='{area_name}' text='{text}'")
-                return
-
-    # 指定區域不可用時，回退為任一可買區域
     for seat in seats:
         text = (seat.text or "").strip()
         class_name = (seat.get_attribute("class") or "").lower()
+        if area_name and area_name not in text:
+            continue
         if _is_blocked(text, class_name):
             continue
         if driver.execute_script("arguments[0].click(); return true;", seat):
-            print(f"已選回退區域: text='{text}'")
+            label = f"'{area_name}'" if area_name else "任意可用區域"
+            print(f"已選座位區域 {label}: text='{text}'")
             return
 
-    debug_text = [
-        f"{idx}: text='{(s.text or '').strip()}' class='{(s.get_attribute('class') or '').strip()}'"
-        for idx, s in enumerate(seats[:10])
-    ]
-    raise RuntimeError("無可購買座位。候選座位: " + " | ".join(debug_text))
+    label = f"'{area_name}'" if area_name else "任意可用區域"
+    all_texts = [f"'{(s.text or '').strip()}'" for s in seats[:10]]
+    raise RuntimeError(f"找不到可點選的座位區域 {label}。頁面上的座位: {', '.join(all_texts)}")
+
+
+def has_quantity_error(driver: webdriver.Chrome, url_before_submit: str, timeout: float = 5.0) -> bool:
+    """提交後等待 URL 跳轉（成功）或錯誤訊息出現（失敗），哪個先發生就立即返回。"""
+    error_xpath = "//*[contains(text(), '您選購的條件已無足夠數量')]"
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.current_url != url_before_submit
+            or d.find_elements(By.XPATH, error_xpath)
+        )
+    except TimeoutException:
+        pass
+    return bool(driver.find_elements(By.XPATH, error_xpath))
 
 
 def capture_captcha_image(
@@ -408,61 +413,72 @@ def main() -> int:
     if not fast_click_js_xpath(driver, order_btn_xpath):
         fast_click(driver, wait, By.XPATH, order_btn_xpath)
 
-    # 選擇座位
-    click_first_available_seat(driver, wait)
-
-    # 選擇票數
-    select_ticket_count(driver, wait, TICKET_COUNT)
-
     captcha_dir = Path("captcha")
     os.makedirs(captcha_dir, exist_ok=True)
     captcha_path = captcha_dir / "captcha.png"
-    captcha_src = capture_captcha_image(driver, wait, captcha_path)
-    print("驗證碼網址：", captcha_src)
 
-    text = ""
-    confidence = 0.0
-    for attempt in range(1, CAPTCHA_MAX_ATTEMPTS + 1):
-        downloaded = False
+    # 依 PREFERRED_AREAS 順序嘗試，提交後若出現數量不足則返回重試
+    for area_idx, area_name in enumerate(PREFERRED_AREAS):
+        print(f"\n--- 嘗試第 {area_idx + 1} 順位區域: '{area_name or '任意'}' ---")
+
+        click_seat_by_area(driver, wait, area_name)
+
+        select_ticket_count(driver, wait, TICKET_COUNT)
+
+        captcha_src = capture_captcha_image(driver, wait, captcha_path)
+        print("驗證碼網址：", captcha_src)
+
+        text = ""
+        for attempt in range(1, CAPTCHA_MAX_ATTEMPTS + 1):
+            downloaded = False
+            try:
+                downloaded = download_captcha_image_with_browser_cookies(driver, captcha_src, captcha_path)
+            except Exception as exc:
+                print(f"[captcha] 下載原圖失敗，改用元素截圖（attempt={attempt}）：{exc}")
+
+            if not downloaded:
+                captcha_src = capture_captcha_image(driver, wait, captcha_path)
+
+            text, confidence = predict_captcha_text(model, device, captcha_path)
+            print(
+                f"CRNN 模型識別結果（第 {attempt}/{CAPTCHA_MAX_ATTEMPTS} 次）: "
+                f"'{text}' (conf={confidence:.3f})"
+            )
+
+            if confidence >= CAPTCHA_MIN_CONFIDENCE:
+                break
+
+            if attempt < CAPTCHA_MAX_ATTEMPTS:
+                print("[captcha] 置信度偏低，刷新驗證碼後重試。")
+                refresh_captcha_image(driver, wait)
+                captcha_src = capture_captcha_image(driver, wait, captcha_path)
+
+        input_captcha = wait.until(EC.presence_of_element_located((By.ID, CAPTCHA_INPUT_ID)))
+        input_captcha.clear()
+        input_captcha.send_keys(text)
+        print("驗證碼已輸入")
+
         try:
-            downloaded = download_captcha_image_with_browser_cookies(driver, captcha_src, captcha_path)
-        except Exception as exc:
-            print(f"[captcha] 下載原圖失敗，改用元素截圖（attempt={attempt}）：{exc}")
+            driver.switch_to.alert.accept()
+        except Exception:
+            pass
 
-        if not downloaded:
-            captcha_src = capture_captcha_image(driver, wait, captcha_path)
+        url_before_submit = driver.current_url
+        fast_click(driver, wait, By.XPATH, "//*[@id='TicketForm_agree']")
+        fast_click(driver, wait, By.CSS_SELECTOR, "button.btn.btn-primary.btn-green")
+        print("已提交，等待結果...")
 
-        text, confidence = predict_captcha_text(model, device, captcha_path)
-        print(
-            f"CRNN 模型識別結果（第 {attempt}/{CAPTCHA_MAX_ATTEMPTS} 次）: "
-            f"'{text}' (conf={confidence:.3f})"
-        )
+        if has_quantity_error(driver, url_before_submit):
+            print("偵測到「您選購的條件已無足夠數量」，返回座位選擇頁重試下一順位")
+            driver.back()
+            driver.back()
+            time.sleep(0.5)
+            continue
 
-        if confidence >= CAPTCHA_MIN_CONFIDENCE:
-            break
+        print("提交流程完成")
+        return 0
 
-        if attempt < CAPTCHA_MAX_ATTEMPTS:
-            print("[captcha] 置信度偏低，刷新驗證碼後重試。")
-            refresh_captcha_image(driver, wait)
-            captcha_src = capture_captcha_image(driver, wait, captcha_path)
-
-    # 輸入驗證碼
-    input_captcha = wait.until(EC.presence_of_element_located((By.ID, CAPTCHA_INPUT_ID)))
-    input_captcha.clear()
-    input_captcha.send_keys(text)
-    print("驗證碼已輸入")
-
-    # 關閉可能彈窗
-    try:
-        driver.switch_to.alert.accept()
-    except Exception:
-        pass
-
-    # 同意條款 + 提交
-    fast_click(driver, wait, By.XPATH, "//*[@id='TicketForm_agree']")
-    fast_click(driver, wait, By.CSS_SELECTOR, "button.btn.btn-primary.btn-green")
-    print("提交流程完成")
-    return 0
+    raise RuntimeError("所有 PREFERRED_AREAS 順位均無法購票")
 
 
 if __name__ == "__main__":
